@@ -112,7 +112,8 @@ extern u64 time_spent_working;
 static void at_exit() {
 
   s32   i, pid1 = 0, pid2 = 0, pgrp = -1;
-  char *list[4] = {SHM_ENV_VAR, SHM_FUZZ_ENV_VAR, CMPLOG_SHM_ENV_VAR, NULL};
+  char *list[5] = {SHM_ENV_VAR, SHM_FUZZ_ENV_VAR, CMPLOG_SHM_ENV_VAR,
+                   SHADOW_SHM_ENV_VAR, NULL};
   char *ptr;
 
   ptr = getenv("__AFL_TARGET_PID2");
@@ -1075,7 +1076,12 @@ int main(int argc, char **argv_orig, char **envp) {
           FATAL("Value of -m out of range on 32-bit systems");
 
         }
+        break;
+      }
 
+      case 'w': {
+        afl->use_shadow_bits = 1;
+        break;
       }
 
       break;
@@ -2529,6 +2535,9 @@ int main(int argc, char **argv_orig, char **envp) {
   afl->fsrv.trace_bits =
       afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode);
 
+  afl->fsrv.shadow_bits = afl_shm_init(&afl->shadow_shm, afl->fsrv.shadow_size,
+                                       afl->non_instrumented_mode);
+
   if (!afl->non_instrumented_mode && !afl->fsrv.qemu_mode &&
       !afl->unicorn_mode && !afl->fsrv.frida_mode && !afl->fsrv.cs_mode &&
       !afl->afl_env.afl_skip_bin_check) {
@@ -2906,11 +2915,12 @@ int main(int argc, char **argv_orig, char **envp) {
     if (afl->in_bitmap) {
 
       read_bitmap(afl->in_bitmap, afl->virgin_bits, afl->fsrv.map_size);
+      FATAL("Should've provided shadow_bits for initialization");
 
     } else {
 
       memset(afl->virgin_bits, 255, map_size);
-
+      memset(afl->shadow_bits, 255, afl->shadow_shm.map_size);
     }
 
     memset(afl->virgin_tmout, 255, map_size);
@@ -2993,8 +3003,8 @@ int main(int argc, char **argv_orig, char **envp) {
 
   }
 
-  if (!afl->non_instrumented_mode) { write_stats_file(afl, 0, 0, 0, 0); }
-  maybe_update_plot_file(afl, 0, 0, 0);
+  if (!afl->non_instrumented_mode) { write_stats_file(afl,0, 0, 0, 0, 0); }
+  maybe_update_plot_file(afl,0, 0, 0, 0);
   save_auto(afl);
 
   if (afl->stop_soon) { goto stop_fuzzing; }
@@ -3420,7 +3430,7 @@ stop_fuzzing:
   afl->force_ui_update = 1;  // ensure the screen is reprinted
   afl->stop_soon = 1;        // ensure everything is written
   show_stats(afl);           // print the screen one last time
-  write_bitmap(afl);
+  write_bitmaps(afl);
   save_auto(afl);
 
   #ifdef __AFL_CODE_COVERAGE
@@ -3507,7 +3517,7 @@ stop_fuzzing:
     SAYF(cYEL "[!] " cRST
               "\nPerforming final sync, this make take some time ...\n");
     sync_fuzzers(afl);
-    write_bitmap(afl);
+    write_bitmaps(afl);
     SAYF(cYEL "[!] " cRST "Done!\n\n");
 
   }
@@ -3600,6 +3610,7 @@ stop_fuzzing:
   destroy_extras(afl);
   destroy_custom_mutators(afl);
   afl_shm_deinit(&afl->shm);
+  afl_shm_deinit(&afl->shadow_shm);
 
   if (afl->shm_fuzz) {
 

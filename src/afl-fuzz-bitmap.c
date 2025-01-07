@@ -71,27 +71,37 @@ static const u8 count_class_lookup8[256] = {
   #define NAME_MAX _XOPEN_NAME_MAX
 #endif
 
-/* Write bitmap to file. The bitmap is useful mostly for the secret
-   -B option, to focus a separate fuzzing session on a particular
-   interesting input without rediscovering all the others. */
-
-void write_bitmap(afl_state_t *afl) {
-
+void write_bitmap(u8 *buf, u32 len, u8 *out_dir, u8 *name) {
   u8  fname[PATH_MAX];
   s32 fd;
 
-  if (!afl->bitmap_changed) { return; }
-  afl->bitmap_changed = 0;
+  snprintf(fname, PATH_MAX, "%s/fuzz_initial_%s", out_dir, name);
 
-  snprintf(fname, PATH_MAX, "%s/fuzz_bitmap", afl->out_dir);
+  // if initial bitmap file already exists, write to current bitmap file
+  if (access(fname, F_OK) == 0) {
+    snprintf(fname, PATH_MAX, "%s/fuzz_%s", out_dir, name);
+  }
+
   fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, DEFAULT_PERMISSION);
 
   if (fd < 0) { PFATAL("Unable to open '%s'", fname); }
 
-  ck_write(fd, afl->virgin_bits, afl->fsrv.map_size, fname);
+  ck_write(fd, buf, len, fname);
 
   close(fd);
+}
 
+/* Write bitmaps to file. The bitmap is useful mostly for the secret
+   -B option, to focus a separate fuzzing session on a particular
+   interesting input without rediscovering all the others. */
+
+void write_bitmaps(afl_state_t *afl) {
+  if (!afl->bitmap_changed) { return; }
+  afl->bitmap_changed = 0;
+
+  write_bitmap(afl->virgin_bits, afl->fsrv.map_size, afl->out_dir, "bitmap");
+  write_bitmap(afl->shadow_bits, afl->fsrv.shadow_size, afl->out_dir,
+               "shadowmap");
 }
 
 /* Count the number of bits set in the provided bitmap. Used for the status
@@ -129,6 +139,22 @@ u32 count_bits(afl_state_t *afl, u8 *mem) {
 
   return ret;
 
+}
+
+u32 count_shadow_bits(u8 *mem, u32 size) {
+  u32  ret = 0;
+  u32 *Mem = (u32 *)mem;
+  size = size >> 2;
+  while (size--) {
+    u32 v = *(Mem++);
+    if (likely(v == 0)) { continue; }
+    v = v - ((v >> 1) & 0x55555555);                 // add pairs of bits
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);  // quads
+    v = (v + (v >> 4)) & 0x0F0F0F0F;                 // groups of 8
+    ret += (v * 0x01010101) >> 24;                   // horizontal sum of bytes
+  }
+
+  return ret;
 }
 
 /* Count the number of bytes set in the bitmap. Called fairly sporadically,
@@ -245,6 +271,23 @@ inline u8 has_new_bits(afl_state_t *afl, u8 *virgin_map) {
 
 }
 
+inline u8 cmp_and_merge_shadow_bits(u8 *new, u8 *global, u32 size) {
+  u64 *New = (u64 *)new;
+  u64 *Global = (u64 *)global;
+  size = size >> 3;
+  u8 ret = 0;
+  while (size) {
+    if ((*Global & *New) != 0) { ret = 1; }
+
+    *Global &= ~*New;
+    Global++;
+    New++;
+    size--;
+  }
+
+  return ret;
+}
+
 /* A combination of classify_counts and has_new_bits. If 0 is returned, then the
  * trace bits are kept as-is. Otherwise, the trace bits are overwritten with
  * classified values.
@@ -256,6 +299,16 @@ inline u8 has_new_bits(afl_state_t *afl, u8 *virgin_map) {
  * return has_new_bits(). */
 
 inline u8 has_new_bits_unclassified(afl_state_t *afl, u8 *virgin_map) {
+  if (cmp_and_merge_shadow_bits(afl->fsrv.shadow_bits, afl->shadow_bits,
+                                afl->fsrv.shadow_size)) {
+    //  We compare and merge shadow bits anyway to see the difference when
+    //  fuzzing isel.
+    if (likely(afl->use_shadow_bits)) {
+      // Also classify and merge edge coverage map.
+      classify_counts(&afl->fsrv);
+      return 4 | has_new_bits(afl, virgin_map);
+    }
+  }
 
   /* Handle the hot path first: no new coverage */
   u8 *end = afl->fsrv.trace_bits + afl->fsrv.map_size;
@@ -299,8 +352,7 @@ void minimize_bits(afl_state_t *afl, u8 *dst, u8 *src) {
    that led to its discovery. Returns a ptr to afl->describe_op_buf_256. */
 
 u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len) {
-
-  u8 is_timeout = 0;
+  u8 is_timeout = 0, new_shadow_cov = 0;
   u8 san_crash_only = (afl->san_case_status & SAN_CRASH_ONLY);
   u8 non_cov_incr = (afl->san_case_status & NON_COV_INCREASE_BUG);
 
@@ -309,6 +361,11 @@ u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len) {
     new_bits -= 0x80;
     is_timeout = 1;
 
+  }
+
+  if (new_bits & 0x4) {
+    new_bits -= 4;
+    new_shadow_cov = 1;
   }
 
   size_t real_max_len =
@@ -391,6 +448,8 @@ u8 *describe_op(afl_state_t *afl, u8 new_bits, size_t max_description_len) {
   }
 
   if (is_timeout) { strcat(ret, ",+tout"); }
+
+  if (new_shadow_cov) { strcat(ret, ",+shd"); }
 
   if (new_bits == 2) { strcat(ret, ",+cov"); }
 
@@ -739,7 +798,7 @@ u8 __attribute__((hot)) save_if_interesting(afl_state_t *afl, void *mem,
 
 #endif
 
-    if (new_bits == 2) {
+    if (new_bits & 0b0110) {
 
       afl->queue_top->has_new_cov = 1;
       ++afl->queued_with_cov;
