@@ -616,7 +616,7 @@ int main(int argc, char **argv_orig, char **envp) {
   // still available: HjJkKqrv
   while (
       (opt = getopt(argc, argv,
-                    "+a:Ab:B:c:CdDe:E:f:F:g:G:hi:I:l:L:m:M:nNo:Op:P:QRs:S:t:T:"
+                    "+a:Ab:B:c:CdDe:E:f:F:g:G:hi:jI:l:L:m:M:nNo:Op:P:QRs:S:t:T:"
                     "uUV:w:WXx:YzZ")) > 0) {
 
     switch (opt) {
@@ -1079,7 +1079,7 @@ int main(int argc, char **argv_orig, char **envp) {
         break;
       }
 
-      case 'w': {
+      case 'j': {
         afl->use_shadow_bits = 1;
         break;
       }
