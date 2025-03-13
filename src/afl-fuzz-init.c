@@ -28,7 +28,6 @@
 #include <limits.h>
 #include <string.h>
 #include "cmplog.h"
-#include <stdio.h>
 
 #ifdef HAVE_AFFINITY
 
@@ -910,13 +909,6 @@ void perform_dry_run(afl_state_t *afl) {
   u32                 cal_failures = 0, idx;
   u8                 *use_mem;
 
-  // Open FD
-  FILE* failed_tests = fopen("/home/thoblass/failed_tests.txt", "w");
-  
-  if(failed_tests == NULL){
-    WARNF("Error opening file");
-  }
-
   for (idx = 0; idx < afl->queued_items; idx++) {
 
     q = afl->queue_buf[idx];
@@ -1098,10 +1090,6 @@ void perform_dry_run(afl_state_t *afl) {
                afl->fsrv.mem_limit - 1);
 
         } else {
-
-          // write failed test to file
-          fprintf(failed_tests, "%s\n", q->fname);
-          WARNF("\n Writing test to file! (%s)\n", q->fname);
 
           SAYF("\n" cLRD "[-] " cRST
                "Oops, the program crashed with one of the test cases provided. "
@@ -1344,8 +1332,6 @@ void perform_dry_run(afl_state_t *afl) {
     }
 
   }
-
-  fclose(failed_tests);
 
   if (cal_failures) {
 
